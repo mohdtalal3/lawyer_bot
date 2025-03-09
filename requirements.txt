@@ -1,0 +1,6 @@
+gspread
+google-auth
+requests-html
+pandas
+requests
+lxml[html_clean]
