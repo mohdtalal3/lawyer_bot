@@ -105,18 +105,19 @@ class LeadProcessor:
                     if self.should_stop:
                         break
                         
-                    # Add delay and print statement before processing each lead
-                    print(f"\nWaiting {self.delay} seconds before processing next lead...")
-                    time.sleep(self.delay)
-                    
                     row = all_values[row_idx]
                     
-                    # Skip only if there's a valid doctrine.fr URL
+                    # Skip if there's a valid doctrine.fr URL without adding delay
                     if (row_idx < len(all_values) and 
                         url_index < len(row) and 
                         row[url_index].strip() and 
                         "doctrine.fr/p/avocat" in row[url_index].strip()):
+                        print(f"Skipping row {row_idx+1} - already has valid doctrine.fr URL")
                         continue
+                    
+                    # Only add delay if we're actually going to process this lead
+                    print(f"\nWaiting {self.delay} seconds before processing next lead...")
+                    time.sleep(self.delay)
                     
                     # Convert row to dictionary using cleaned headers
                     data = {headers[i]: value for i, value in enumerate(row) if i < len(headers)}
