@@ -5,6 +5,8 @@ from google.oauth2.service_account import Credentials
 import link_extractor
 import specialty_extractor
 import re
+from time import sleep
+import random
 
 class LeadProcessor:
     def __init__(self, sheet_id, sheet_name, delay=60):
@@ -13,6 +15,8 @@ class LeadProcessor:
         self.sheet_name = sheet_name
         self.delay = float(delay)
         self.should_stop = False
+        self.base_delay = 60  # Base delay for exponential backoff
+        self.max_retries = 5  # Maximum number of retries
         
     def setup_google_sheets(self):
         scope = [
@@ -36,6 +40,29 @@ class LeadProcessor:
         except Exception as e:
             print(f"Error setting up Google Sheets: {str(e)}")
             return None
+
+    def update_sheet_with_backoff(self, leads_sheet, update_cells):
+        """
+        Update sheet with exponential backoff retry mechanism
+        """
+        retry_count = 0
+        while retry_count < self.max_retries:
+            try:
+                leads_sheet.update_cells(update_cells)
+                return True
+            except Exception as e:
+                if "Quota exceeded" in str(e) or "429" in str(e):
+                    retry_count += 1
+                    if retry_count == self.max_retries:
+                        raise Exception(f"Max retries ({self.max_retries}) exceeded for API quota limit")
+                    
+                    # Calculate delay with exponential backoff and jitter
+                    delay = min(300, self.base_delay * (2 ** retry_count) + random.uniform(0, 10))
+                    print(f"\n⚠️ Rate limit hit! Waiting {delay:.1f} seconds before retry {retry_count}/{self.max_retries}")
+                    sleep(delay)
+                else:
+                    raise e
+        return False
 
     def process_leads(self):
         leads_sheet = self.setup_google_sheets()
@@ -78,6 +105,10 @@ class LeadProcessor:
                     if self.should_stop:
                         break
                         
+                    # Add delay and print statement before processing each lead
+                    print(f"\nWaiting {self.delay} seconds before processing next lead...")
+                    time.sleep(self.delay)
+                    
                     row = all_values[row_idx]
                     
                     # Skip only if there's a valid doctrine.fr URL
@@ -119,7 +150,11 @@ class LeadProcessor:
                                 update_cells.append(gspread.Cell(row_idx+1, idx+1, "None"))
                             update_cells.append(gspread.Cell(row_idx+1, serment_index+1, "Not found"))
                             update_cells.append(gspread.Cell(row_idx+1, url_index+1, "Not found"))
-                            leads_sheet.update_cells(update_cells)
+                            try:
+                                self.update_sheet_with_backoff(leads_sheet, update_cells)
+                            except Exception as e:
+                                print(f"Failed to update sheet after retries: {str(e)}")
+                                continue
                             continue
                         
                         print(f"Found doctrine.fr link: {doctrine_url}")
@@ -133,7 +168,11 @@ class LeadProcessor:
                                 update_cells.append(gspread.Cell(row_idx+1, idx+1, "None"))
                             update_cells.append(gspread.Cell(row_idx+1, serment_index+1, "Not found"))
                             update_cells.append(gspread.Cell(row_idx+1, url_index+1, doctrine_url))
-                            leads_sheet.update_cells(update_cells)
+                            try:
+                                self.update_sheet_with_backoff(leads_sheet, update_cells)
+                            except Exception as e:
+                                print(f"Failed to update sheet after retries: {str(e)}")
+                                continue
                             continue
                             
                         lawyer_id = lawyer_id.group(1)
@@ -206,11 +245,14 @@ class LeadProcessor:
                             # Mark URL as None to retry later
                             update_cells.append(gspread.Cell(row_idx+1, url_index+1, "None"))
                         
-                        # Update the sheet
-                        leads_sheet.update_cells(update_cells)
+                        # When updating the sheet, use update_sheet_with_backoff directly
+                        try:
+                            self.update_sheet_with_backoff(leads_sheet, update_cells)
+                        except Exception as e:
+                            print(f"Failed to update sheet after retries: {str(e)}")
+                            continue
                         
                         print(f"Successfully processed {first_name} {last_name}")
-                        time.sleep(2)  # Small delay between processing
                         
                     except Exception as e:
                         error_message = str(e)
@@ -218,7 +260,7 @@ class LeadProcessor:
                         continue
                 
                 # Wait before checking for new leads
-                print(f"Waiting {self.delay} seconds before checking for new leads...")
+                print(f"\nWaiting {self.delay} seconds before checking for new leads...")
                 time.sleep(self.delay)
                 
             except Exception as e:
