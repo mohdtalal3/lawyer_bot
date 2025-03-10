@@ -140,7 +140,26 @@ class LeadProcessor:
                         
                         try:
                             # Extract specialties and oath date
-                            specialties, oath_date = specialty_extractor.extract_lawyer_data(lawyer_id)
+                            specialties, oath_date, error_type = specialty_extractor.extract_lawyer_data(lawyer_id)
+                            
+                            # Check if there was a session cookie error
+                            if error_type == "readKey" or error_type and "cookie" in error_type:
+                                print("\n⚠️ SESSION COOKIE ERROR ⚠️")
+                                print("Your session cookie has expired or is invalid.")
+                                print("Please update the session_cookie.txt file with a new cookie.")
+                                print("See the README for instructions on getting a new session cookie.")
+                                
+                                # Ask user if they want to update the cookie now
+                                update_now = input("Have you updated the session cookie? (y/n): ").strip().lower()
+                                if update_now == 'y':
+                                    print("Continuing with the updated session cookie...")
+                                    # Try again with the updated cookie
+                                    specialties, oath_date, error_type = specialty_extractor.extract_lawyer_data(lawyer_id)
+                                    if error_type:
+                                        raise Exception(f"Still having issues with the cookie: {error_type}")
+                                else:
+                                    print("Please update the session cookie and restart the bot.")
+                                    sys.exit(1)
                             
                             # Update specialties (up to 5)
                             for i, idx in enumerate(specialty_indices):
@@ -153,15 +172,39 @@ class LeadProcessor:
                             oath_date = oath_date if oath_date else "Not found"
                             update_cells.append(gspread.Cell(row_idx+1, serment_index+1, oath_date))
                             
+                            # If no oath_date were found, mark URL as None to retry later
+                            if oath_date == "Not found":
+                                update_cells.append(gspread.Cell(row_idx+1, url_index+1, "None"))
+                                print(f"No oath date found for {first_name} {last_name}, marking for retry")
+                            else:
+                                # Update the URL if specialties were found
+                                update_cells.append(gspread.Cell(row_idx+1, url_index+1, doctrine_url))
+                            
                         except Exception as e:
+                            error_message = str(e)
                             print(f"Error extracting data for {first_name} {last_name}: {str(e)}")
+                            
+                            # Check if it's a session cookie error
+                            if "readKey" in error_message or "session cookie" in error_message.lower():
+                                print("\n⚠️ SESSION COOKIE ERROR ⚠️")
+                                print("Your session cookie has expired or is invalid.")
+                                print("Please update the session_cookie.txt file with a new cookie.")
+                                print("See the README for instructions on getting a new session cookie.")
+                                
+                                # Ask user if they want to update the cookie now
+                                update_now = input("Have you updated the session cookie? (y/n): ").strip().lower()
+                                if update_now == 'y':
+                                    print("Continuing with the updated session cookie...")
+                                else:
+                                    print("Please update the session cookie and restart the bot.")
+                                    sys.exit(1)
+                            
                             # Update with empty values if extraction fails
                             for idx in specialty_indices:
                                 update_cells.append(gspread.Cell(row_idx+1, idx+1, "None"))
                             update_cells.append(gspread.Cell(row_idx+1, serment_index+1, "Not found"))
-                        
-                        # Always update the URL if we found one
-                        update_cells.append(gspread.Cell(row_idx+1, url_index+1, doctrine_url))
+                            # Mark URL as None to retry later
+                            update_cells.append(gspread.Cell(row_idx+1, url_index+1, "None"))
                         
                         # Update the sheet
                         leads_sheet.update_cells(update_cells)
