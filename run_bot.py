@@ -19,7 +19,9 @@ class LeadProcessor:
         self.processed_sheet_name = "processed_lawyers"
         self.connection_retry_delay = 300
         self.max_connection_retries = 3
-        self.processed_urls = set()  # Keep track of processed URLs
+        self.processed_urls = set()  # Successfully processed URLs
+        self.failed_urls = {}  # Track failed URLs and their attempt counts
+        self.max_url_attempts = 3  # Maximum attempts per URL before skipping
 
     def setup_google_sheets(self):
         scope = [
@@ -131,16 +133,21 @@ class LeadProcessor:
             city = row[city_index].strip()
             current_url = row[url_index].strip() if url_index < len(row) else ""
 
-            # Check if URL is already processed
+            # Check if URL is already processed or has failed too many times
             if current_url and "doctrine.fr/p/avocat" in current_url:
                 if current_url in self.processed_urls:
                     print(f"Skipping already processed: {first_name} {last_name} ({current_url})")
-                    return
-                print(f"Starting new: {first_name} {last_name} ({current_url})")
+                    return True  # Return True to indicate successful skip
+                if current_url in self.failed_urls:
+                    attempts = self.failed_urls[current_url]
+                    if attempts >= self.max_url_attempts:
+                        print(f"Skipping {current_url} after {attempts} failed attempts")
+                        return True  # Return True to indicate successful skip
+                    print(f"Retrying {current_url} (attempt {attempts + 1}/{self.max_url_attempts})")
 
             if not first_name or not last_name or not city:
                 print(f"Missing required data for row {row_idx+1}")
-                return
+                return False
 
             print(f"Processing: {first_name} {last_name} in {city}")
             
@@ -193,13 +200,26 @@ class LeadProcessor:
             
             print(f"Successfully processed {first_name} {last_name}")
             
+            # If we got here without a valid URL or oath date, count as a failure
+            if not lawyer_url or lawyer_url == "Not found":
+                if current_url:
+                    self.failed_urls[current_url] = self.failed_urls.get(current_url, 0) + 1
+                    print(f"Added {current_url} to failed URLs (attempt {self.failed_urls[current_url]})")
+                return False
+
             # Add URL to processed set if successful
-            if lawyer_url:
-                self.processed_urls.add(lawyer_url)
-                print(f"Added to processed: {lawyer_url}")
+            self.processed_urls.add(lawyer_url)
+            if lawyer_url in self.failed_urls:
+                del self.failed_urls[lawyer_url]
+            print(f"Added to processed: {lawyer_url}")
+            return True
 
         except Exception as e:
             print(f"Error processing row {row_idx+1}: {str(e)}")
+            if current_url:
+                self.failed_urls[current_url] = self.failed_urls.get(current_url, 0) + 1
+                print(f"Added {current_url} to failed URLs (attempt {self.failed_urls[current_url]})")
+            return False
 
     def process_leads(self):
         leads_sheet, processed_sheet = self.setup_google_sheets()
@@ -223,15 +243,20 @@ class LeadProcessor:
                     row = all_values[row_idx]
                     current_url = row[url_index].strip() if url_index < len(row) else ""
                     
-                    # Skip if URL is already processed
+                    # Skip if URL is already processed or has failed too many times
                     if current_url and "doctrine.fr/p/avocat" in current_url:
                         if current_url in self.processed_urls:
+                            continue
+                        if current_url in self.failed_urls and self.failed_urls[current_url] >= self.max_url_attempts:
                             continue
                     
                     self.process_single_lead(leads_sheet, processed_sheet, row_idx, row, headers)
                     time.sleep(random.uniform(1, 2))  # Small delay between processing
                 
-                print(f"\nWaiting {self.delay} seconds before checking for new leads...")
+                print(f"\nBatch summary:")
+                print(f"- Processed URLs: {len(self.processed_urls)}")
+                print(f"- Failed URLs: {len(self.failed_urls)}")
+                print(f"Waiting {self.delay} seconds before checking for new leads...")
                 time.sleep(self.delay)
                 
             except Exception as e:

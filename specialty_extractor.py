@@ -94,30 +94,30 @@ def extract_lawyer_data(first_name, last_name, city):
         cookie_file = "session_cookie.txt"
         if not os.path.exists(cookie_file):
             print(f"Error: {cookie_file} not found.")
-            return [], "Not found", "cookie_missing"
+            return [], "Not found", None
             
         with open(cookie_file, "r") as f:
             session_cookie = f.read().strip()
             if not session_cookie:
                 print(f"Error: {cookie_file} is empty.")
-                return [], "Not found", "cookie_empty"
+                return [], "Not found", None
             session.cookies.update({"session": session_cookie})
     except Exception as e:
         print(f"Error reading session cookie: {str(e)}")
-        return [], "Not found", "cookie_error"
+        return [], "Not found", None
+
+    # First get the lawyer ID
+    lawyer_id = get_lawyer_id(session, first_name, last_name, city)
+    if not lawyer_id:
+        print(f"Could not find lawyer ID for {first_name} {last_name} in {city}")
+        return [], "Not found", None
+
+    # URL for the lawyer page
+    url_lawyer_page = f"https://www.doctrine.fr/p/avocat/{lawyer_id}"
+    print(f"URL for the lawyer page: {url_lawyer_page}")
 
     while retry_count < max_retries:
         try:
-            # Get lawyer ID using the same session
-            lawyer_id = get_lawyer_id(session, first_name, last_name, city)
-            if not lawyer_id:
-                print(f"Could not find lawyer ID for {first_name} {last_name} in {city}")
-                return [], "Not found", None
-
-            # URL for the lawyer page
-            url_lawyer_page = f"https://www.doctrine.fr/p/avocat/{lawyer_id}"
-            print(f"URL for the lawyer page: {url_lawyer_page}")
-
             # Headers for lawyer page
             headers_first = {
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -131,8 +131,8 @@ def extract_lawyer_data(first_name, last_name, city):
 
             if response_first.status_code in [429, 403]:
                 retry_count += 1
-                print(f"\n⚠️ Rate limit detected! Setting pause for all threads...")
-                time.sleep(delay)  # Wait for 2 minutes
+                print(f"\n⚠️ Rate limit detected! Waiting {delay} seconds before retry {retry_count}/{max_retries}")
+                time.sleep(delay)
                 continue
 
             if response_first.status_code == 200:
@@ -168,7 +168,7 @@ def extract_lawyer_data(first_name, last_name, city):
                             if not specialties:
                                 specialties = ["None"] * 5
                             session.close()
-                            return specialties, oath_date, lawyer_url
+                            return specialties, oath_date, url_lawyer_page
 
                     except KeyError as e:
                         retry_count += 1
@@ -178,6 +178,9 @@ def extract_lawyer_data(first_name, last_name, city):
                         print(f"\n⚠️ Access denied! Setting pause for all threads...")
                         time.sleep(delay)
                         continue
+
+            print(f"Failed with status code {response_first.status_code}")
+            return [], "Not found", None
 
         except Exception as e:
             print(f"Error processing request: {str(e)}")
