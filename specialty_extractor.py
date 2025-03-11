@@ -83,7 +83,6 @@ def extract_lawyer_data(first_name, last_name, city):
     """
     Extract lawyer specialties and oath date from doctrine.fr
     """
-    # Create a session for all requests
     session = requests.Session()
     retry_count = 0
     max_retries = 5
@@ -131,7 +130,24 @@ def extract_lawyer_data(first_name, last_name, city):
 
             if response_first.status_code in [429, 403]:
                 retry_count += 1
-                print(f"\n⚠️ Rate limit detected! Waiting {delay} seconds before retry {retry_count}/{max_retries}")
+                if retry_count >= max_retries:
+                    print("\n⚠️ Maximum retries reached. Please try again later.")
+                    return [], "Not found", None
+                    
+                print(f"\n⚠️ Rate limit/Access denied! Attempt {retry_count}/{max_retries}")
+                print("Please solve the CAPTCHA in your browser:")
+                print(f"URL: {url_lawyer_page}")
+                try:
+                    user_input = input("Press Enter after solving CAPTCHA (or type 'skip' to skip): ")
+                    if user_input.lower() == 'skip':
+                        print("Skipping this lawyer...")
+                        return [], "Not found", None
+                except KeyboardInterrupt:
+                    print("\nProcess interrupted by user")
+                    return [], "Not found", None
+                
+                # Add a delay after user input
+                print(f"Waiting {delay} seconds before retry...")
                 time.sleep(delay)
                 continue
 
@@ -175,10 +191,18 @@ def extract_lawyer_data(first_name, last_name, city):
                         if retry_count >= max_retries:
                             print("\n⚠️ CAPTCHA detected after maximum retries! Stopping the process.")
                             sys.exit(1)
-                        print(f"\n⚠️ Access denied! Setting pause for all threads...")
-                        print("Please solve the CAPTCHA and press Enter to continue...")
-                        print("Open this url in your browser",url_lawyer_page)
-                        input("Press Enter to continue...")
+                        print("\n⚠️ Access denied! CAPTCHA challenge detected.")
+                        print("Please solve the CAPTCHA in your browser:")
+                        print(f"URL: {url_lawyer_page}")
+                        try:
+                            user_input = input("Press Enter after solving CAPTCHA (or type 'skip' to skip): ")
+                            if user_input.lower() == 'skip':
+                                print("Skipping this lawyer...")
+                                return [], "Not found", None
+                        except KeyboardInterrupt:
+                            print("\nProcess interrupted by user")
+                            return [], "Not found", None
+                        
                         time.sleep(delay)
                         continue
 
