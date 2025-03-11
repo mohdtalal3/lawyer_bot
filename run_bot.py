@@ -137,17 +137,18 @@ class LeadProcessor:
             if current_url and "doctrine.fr/p/avocat" in current_url:
                 if current_url in self.processed_urls:
                     print(f"Skipping already processed: {first_name} {last_name} ({current_url})")
-                    return True  # Return True to indicate successful skip
+                    return
                 if current_url in self.failed_urls:
                     attempts = self.failed_urls[current_url]
                     if attempts >= self.max_url_attempts:
                         print(f"Skipping {current_url} after {attempts} failed attempts")
-                        return True  # Return True to indicate successful skip
+                        return
                     print(f"Retrying {current_url} (attempt {attempts + 1}/{self.max_url_attempts})")
+                print(f"Starting new: {first_name} {last_name} ({current_url})")
 
             if not first_name or not last_name or not city:
                 print(f"Missing required data for row {row_idx+1}")
-                return False
+                return
 
             print(f"Processing: {first_name} {last_name} in {city}")
             
@@ -200,26 +201,18 @@ class LeadProcessor:
             
             print(f"Successfully processed {first_name} {last_name}")
             
-            # If we got here without a valid URL or oath date, count as a failure
-            if not lawyer_url or lawyer_url == "Not found":
-                if current_url:
-                    self.failed_urls[current_url] = self.failed_urls.get(current_url, 0) + 1
-                    print(f"Added {current_url} to failed URLs (attempt {self.failed_urls[current_url]})")
-                return False
-
             # Add URL to processed set if successful
-            self.processed_urls.add(lawyer_url)
-            if lawyer_url in self.failed_urls:
-                del self.failed_urls[lawyer_url]
-            print(f"Added to processed: {lawyer_url}")
-            return True
+            if lawyer_url:
+                self.processed_urls.add(lawyer_url)
+                if lawyer_url in self.failed_urls:
+                    del self.failed_urls[lawyer_url]  # Remove from failed URLs if successful
+                print(f"Added to processed: {lawyer_url}")
 
         except Exception as e:
             print(f"Error processing row {row_idx+1}: {str(e)}")
-            if current_url:
+            if current_url and "doctrine.fr/p/avocat" in current_url:
                 self.failed_urls[current_url] = self.failed_urls.get(current_url, 0) + 1
                 print(f"Added {current_url} to failed URLs (attempt {self.failed_urls[current_url]})")
-            return False
 
     def process_leads(self):
         leads_sheet, processed_sheet = self.setup_google_sheets()

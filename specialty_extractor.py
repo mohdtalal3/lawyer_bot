@@ -176,6 +176,9 @@ def extract_lawyer_data(first_name, last_name, city):
                             print("\n⚠️ CAPTCHA detected after maximum retries! Stopping the process.")
                             sys.exit(1)
                         print(f"\n⚠️ Access denied! Setting pause for all threads...")
+                        print("Please solve the CAPTCHA and press Enter to continue...")
+                        print("Open this url in your browser",url_lawyer_page)
+                        input("Press Enter to continue...")
                         time.sleep(delay)
                         continue
 
