@@ -4,6 +4,7 @@ import re
 import pandas as pd
 import os
 import sys
+import time
 
 def get_lawyer_id(session, first_name, last_name, city):
     """
@@ -78,136 +79,126 @@ def extract_data(data):
         print(f"Error extracting specialties: {str(e)}")
         return pd.DataFrame(columns=['Subcategory', 'Count'])
 
-def extract_lawyer_data(first_name, last_name, city):
+def extract_lawyer_data(first_name, last_name, city, rate_limit_event):
     """
     Extract lawyer specialties and oath date from doctrine.fr
+    rate_limit_event: Threading event to coordinate rate limit pauses
     """
     # Create a session for all requests
     session = requests.Session()
+    retry_count = 0
+    max_retries = 5
+    delay = 120  # Fixed 2 minutes delay
     
     # Read session cookie from file
     try:
         cookie_file = "session_cookie.txt"
         if not os.path.exists(cookie_file):
-            print(f"Error: {cookie_file} not found. Please create this file with your session cookie.")
+            print(f"Error: {cookie_file} not found.")
             return [], "Not found", "cookie_missing"
             
         with open(cookie_file, "r") as f:
             session_cookie = f.read().strip()
             if not session_cookie:
-                print(f"Error: {cookie_file} is empty. Please add your session cookie to this file.")
+                print(f"Error: {cookie_file} is empty.")
                 return [], "Not found", "cookie_empty"
             session.cookies.update({"session": session_cookie})
     except Exception as e:
         print(f"Error reading session cookie: {str(e)}")
         return [], "Not found", "cookie_error"
 
-    # Get lawyer ID using the same session
-    lawyer_id = get_lawyer_id(session, first_name, last_name, city)
-    if not lawyer_id:
-        print(f"Could not find lawyer ID for {first_name} {last_name} in {city}")
-        return [], "Not found", None
+    while retry_count < max_retries:
+        try:
+            # Check if we're in a rate limit pause
+            if rate_limit_event.is_set():
+                print(f"Thread for {first_name} {last_name} waiting for rate limit cooldown...")
+                rate_limit_event.wait()  # Wait until the event is cleared
+            
+            # Get lawyer ID using the same session
+            lawyer_id = get_lawyer_id(session, first_name, last_name, city)
+            if not lawyer_id:
+                print(f"Could not find lawyer ID for {first_name} {last_name} in {city}")
+                return [], "Not found", None
 
-    # URL for the lawyer page
-    url_lawyer_page = f"https://www.doctrine.fr/p/avocat/{lawyer_id}"
-    print(f"URL for the lawyer page: {url_lawyer_page}")
-    # Headers for lawyer page
-    headers_first = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-        "Referer": "https://www.doctrine.fr",
-        "Upgrade-Insecure-Requests": "1"
-    }
+            # URL for the lawyer page
+            url_lawyer_page = f"https://www.doctrine.fr/p/avocat/{lawyer_id}"
+            print(f"URL for the lawyer page: {url_lawyer_page}")
 
-    # Update session headers
-    session.headers.update(headers_first)
+            # Headers for lawyer page
+            headers_first = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+                "Referer": "https://www.doctrine.fr",
+                "Upgrade-Insecure-Requests": "1"
+            }
 
-    # Send GET request to lawyer page
-    response_first = session.get(url_lawyer_page)
+            session.headers.update(headers_first)
+            response_first = session.get(url_lawyer_page)
 
-    # Default values
-    specialties = []
-    oath_date = "Not found"
-    lawyer_url = None  # Add this to track the URL
+            if response_first.status_code in [429, 403]:
+                retry_count += 1
+                print(f"\n⚠️ Rate limit detected! Setting pause for all threads...")
+                rate_limit_event.set()  # Signal all threads to pause
+                time.sleep(delay)  # Wait for 2 minutes
+                rate_limit_event.clear()  # Allow threads to continue
+                continue
 
-    if response_first.status_code == 200:
-        # Save the valid URL since we got a 200 response
-        lawyer_url = url_lawyer_page
-        
-        # Extract JSON from the response HTML using regex
-        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', response_first.text, re.DOTALL)
-        
-        if match:
-            try:
-                json_data = match.group(1)
-                data = json.loads(json_data)
+            if response_first.status_code == 200:
+                lawyer_url = url_lawyer_page
+                match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', response_first.text, re.DOTALL)
+                
+                if match:
+                    try:
+                        json_data = match.group(1)
+                        data = json.loads(json_data)
+                        read_key = data["props"]["pageProps"]["readKey"]
+                        summary = data["props"]["pageProps"]["lawyerInfos"]["summary"]
 
-                # Extract `readKey` and `summary`
-                read_key = data["props"]["pageProps"]["readKey"]
-                summary = data["props"]["pageProps"]["lawyerInfos"]["summary"]
+                        # Extract oath date
+                        oath_date_match = re.search(r"prêté serment le (\d{1,2} \w+ \d{4})|(\d{1,2} \w+ \d{4})", summary)
+                        oath_date = oath_date_match.group(1) if oath_date_match and oath_date_match.group(1) else oath_date_match.group(2) if oath_date_match else "Not found"
 
-                # Extract oath date
-                oath_date_match = re.search(r"prêté serment le (\d{1,2} \w+ \d{4})|(\d{1,2} \w+ \d{4})", summary)
-                if oath_date_match:
-                    oath_date = oath_date_match.group(1) if oath_date_match.group(1) else oath_date_match.group(2)
+                        # Get specialties
+                        headers_second = {
+                            "Accept": "application/json",
+                            "Content-Type": "application/json",
+                            "Referer": url_lawyer_page,
+                        }
+                        session.headers.update(headers_second)
+                        
+                        url_decisions = f"https://www.doctrine.fr/api/v2/lawyers/{lawyer_id}/decisions"
+                        response_second = session.get(url_decisions, params={"read_key": read_key})
 
-                # Headers for decisions request
-                headers_second = {
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    "Referer": url_lawyer_page,
-                }
-                session.headers.update(headers_second)
+                        if response_second.status_code == 200:
+                            decisions_data = response_second.json()
+                            top_subcategories = extract_data(decisions_data)
+                            specialties = top_subcategories['Subcategory'].tolist()
+                            if not specialties:
+                                specialties = ["None"] * 5
+                            session.close()
+                            return specialties, oath_date, lawyer_url
 
-                # Get decisions data
-                url_decisions = f"https://www.doctrine.fr/api/v2/lawyers/{lawyer_id}/decisions"
-                response_second = session.get(url_decisions, params={"read_key": read_key})
-
-                if response_second.status_code == 200:
-                    decisions_data = response_second.json()
-                    top_subcategories = extract_data(decisions_data)
-                    specialties = top_subcategories['Subcategory'].tolist()
-                    # If no specialties found but we have URL and oath date, fill with "None"
-                    if not specialties:
-                        specialties = ["None"] * 5
-
-            except KeyError as e:
-                error_msg = str(e)
-                print(f"Error extracting data: {error_msg}")
-                if "readKey" in error_msg:
-                    print("\n⚠️ SESSION COOKIE ERROR ⚠️")
-                    print("Your session cookie has expired or is invalid.")
-                    print("Please update the session_cookie.txt file with a new cookie.")
-                    print("See the README for instructions on getting a new session cookie.")
-                    
-                    # Ask user if they want to update the cookie now
-                    update_now = input("\nHave you updated the session cookie? (y/n): ").strip().lower()
-                    if update_now == 'y':
-                        # Try to reload the cookie
-                        try:
-                            with open(cookie_file, "r") as f:
-                                new_cookie = f.read().strip()
-                                if new_cookie != session_cookie:
-                                    print("Detected updated session cookie. Retrying...")
-                                    session.cookies.update({"session": new_cookie})
-                                    # Retry with new cookie
-                                    return extract_lawyer_data(first_name, last_name, city)
-                                else:
-                                    print("Cookie hasn't been changed. Please update the cookie and try again.")
-                                    sys.exit(1)
-                        except Exception as cookie_error:
-                            print(f"Error reloading cookie: {str(cookie_error)}")
+                    except KeyError as e:
+                        retry_count += 1
+                        if retry_count >= max_retries:
+                            print("\n⚠️ CAPTCHA detected after maximum retries! Stopping the process.")
                             sys.exit(1)
-                    else:
-                        print("Please update the session cookie and restart the bot.")
-                        sys.exit(1)
-                    
-                    return [], "Not found", "readKey"
-                return [], "Not found", "data_error"
+                        print(f"\n⚠️ Access denied! Setting pause for all threads...")
+                        rate_limit_event.set()
+                        time.sleep(delay)
+                        rate_limit_event.clear()
+                        continue
+
+        except Exception as e:
+            print(f"Error processing request: {str(e)}")
+            retry_count += 1
+            if retry_count >= max_retries:
+                break
+            print(f"\n⚠️ Error occurred! Waiting {delay} seconds before retry {retry_count}/{max_retries}")
+            time.sleep(delay)
 
     session.close()
-    # Return the lawyer_url instead of None for the error parameter when successful
-    return specialties, oath_date, lawyer_url if lawyer_url else None
+    return [], "Not found", None
 
 def main():
     # Example usage

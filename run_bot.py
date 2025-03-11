@@ -6,9 +6,12 @@ import specialty_extractor
 import re
 from time import sleep
 import random
+import concurrent.futures
+import threading
+import queue
 
 class LeadProcessor:
-    def __init__(self, sheet_id, sheet_name, delay=60):
+    def __init__(self, sheet_id, sheet_name, delay=60, max_workers=40):
         self.credentials_file = 'credentials.json'
         self.sheet_id = sheet_id
         self.sheet_name = sheet_name
@@ -19,6 +22,10 @@ class LeadProcessor:
         self.processed_sheet_name = "processed_lawyers"
         self.connection_retry_delay = 300  # 5 minutes
         self.max_connection_retries = 3
+        self.max_workers = max_workers
+        self.row_queue = queue.Queue()
+        self.lock = threading.Lock()
+        self.rate_limit_event = threading.Event()
         
     def setup_google_sheets(self):
         scope = [
@@ -111,6 +118,90 @@ class LeadProcessor:
         
         return False
 
+    def process_single_lead(self, leads_sheet, processed_sheet, row_idx, row, headers):
+        """Process a single lead with its own session"""
+        try:
+            # Extract required indices
+            first_name_index = headers.index("First Name")
+            last_name_index = headers.index("Last Name")
+            city_index = headers.index("CITY")
+            specialty_indices = []
+            for i in range(1, 6):
+                specialty_indices.append(headers.index(f"speciality {i}"))
+            serment_index = headers.index("Serment")
+            url_index = headers.index("doctrineURL")
+            
+            # Extract data
+            first_name = row[first_name_index].strip()
+            last_name = row[last_name_index].strip()
+            city = row[city_index].strip()
+            
+            if not first_name or not last_name or not city:
+                print(f"Missing required data for row {row_idx+1}")
+                return
+            
+            print(f"Searching for: {first_name} {last_name} in {city}")
+            
+            # Initialize update cells
+            update_cells = []
+            
+            # Extract specialties and oath date
+            specialties, oath_date, lawyer_url = specialty_extractor.extract_lawyer_data(
+                first_name, last_name, city, self.rate_limit_event
+            )
+            
+            with self.lock:  # Lock for sheet updates
+                if lawyer_url:  # If we got a valid URL
+                    # Update specialties (up to 5)
+                    for i, idx in enumerate(specialty_indices):
+                        specialty_value = "None"
+                        if specialties and i < len(specialties):
+                            specialty_value = specialties[i]
+                        update_cells.append(gspread.Cell(row_idx+1, idx+1, specialty_value))
+                    
+                    # Update oath date and URL
+                    update_cells.append(gspread.Cell(row_idx+1, serment_index+1, oath_date))
+                    update_cells.append(gspread.Cell(row_idx+1, url_index+1, lawyer_url))
+                else:
+                    # Handle error case
+                    for idx in specialty_indices:
+                        update_cells.append(gspread.Cell(row_idx+1, idx+1, "None"))
+                    update_cells.append(gspread.Cell(row_idx+1, serment_index+1, "Not found"))
+                    update_cells.append(gspread.Cell(row_idx+1, url_index+1, "Not found"))
+                
+                # Update the sheet
+                if update_cells:
+                    self.update_sheet_with_backoff(leads_sheet, update_cells)
+                    updated_row = leads_sheet.row_values(row_idx + 1)
+                    
+                    # Check if we have both valid URL and oath date
+                    url_value = updated_row[url_index].strip()
+                    oath_date_value = updated_row[serment_index].strip()
+                    
+                    has_valid_url = url_value and url_value not in ["None", "Not found"]
+                    has_valid_oath = oath_date_value and oath_date_value != "Not found"
+                    
+                    if has_valid_url and has_valid_oath:
+                        # Move to processed sheet and delete
+                        if self.move_to_processed(leads_sheet, processed_sheet, row_idx, updated_row):
+                            try:
+                                leads_sheet.delete_rows(row_idx + 1)
+                                print(f"Successfully moved and deleted row {row_idx+1}")
+                            except Exception as e:
+                                print(f"Error deleting row {row_idx+1}: {str(e)}")
+                    else:
+                        missing_items = []
+                        if not has_valid_url:
+                            missing_items.append("URL")
+                        if not has_valid_oath:
+                            missing_items.append("oath date")
+                        print(f"Row {row_idx+1} kept for retry: Missing {' and '.join(missing_items)}")
+                
+            print(f"Successfully processed {first_name} {last_name}")
+            
+        except Exception as e:
+            print(f"Error processing row {row_idx+1}: {str(e)}")
+
     def process_leads(self):
         leads_sheet, processed_sheet = self.setup_google_sheets()
         if not leads_sheet or not processed_sheet:
@@ -118,152 +209,57 @@ class LeadProcessor:
 
         while not self.should_stop:
             try:
-                # Get all records including empty rows
+                # Get all records
                 all_values = leads_sheet.get_all_values()
-                if not all_values:
-                    print("Empty sheet. Waiting...")
-                    time.sleep(self.delay)
-                    continue
-                    
-                # Clean headers by removing trailing/leading spaces
-                headers = [h.strip() for h in all_values[0]]
-                
-                if len(all_values) <= 1:  # Only headers or empty sheet
+                if len(all_values) <= 1:
                     print("No new leads to process. Waiting...")
                     time.sleep(self.delay)
                     continue
+
+                headers = [h.strip() for h in all_values[0]]
                 
-                # Find required column indices
-                try:
-                    first_name_index = headers.index("First Name")
-                    last_name_index = headers.index("Last Name")
-                    city_index = headers.index("CITY")
-                    specialty_indices = []
-                    for i in range(1, 6):
-                        specialty_indices.append(headers.index(f"speciality {i}"))
-                    serment_index = headers.index("Serment")
-                    url_index = headers.index("doctrineURL")
-                except ValueError as e:
-                    print(f"Required column not found in headers: {str(e)}")
-                    return
-                
-                # Process rows from bottom to top (excluding header)
-                for row_idx in range(len(all_values) - 1, 0, -1):
-                    if self.should_stop:
-                        break
-                        
-                    row = all_values[row_idx]
+                # Create a thread pool
+                with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    active_futures = set()
+                    # Process rows from bottom to top
+                    row_indices = list(range(len(all_values) - 1, 0, -1))
                     
-                    # Skip if there's a valid doctrine.fr URL
-                    if (url_index < len(row) and 
-                        row[url_index].strip() and 
-                        "doctrine.fr/p/avocat" in row[url_index].strip()):
-                        print(f"Skipping row {row_idx+1} - already has valid doctrine.fr URL")
-                        # Move to processed sheet and delete immediately
-                        if self.move_to_processed(leads_sheet, processed_sheet, row_idx, row):
-                            try:
-                                leads_sheet.delete_rows(row_idx + 1)
-                                print(f"Successfully moved and deleted row {row_idx+1}")
-                            except Exception as e:
-                                print(f"Error deleting row {row_idx+1}: {str(e)}")
-                        continue
-                    
-                    # Only add delay if we're actually going to process this lead
-                    print(f"\nWaiting {self.delay} seconds before processing next lead...")
-                    time.sleep(self.delay)
-                    
-                    # Convert row to dictionary using cleaned headers
-                    data = {headers[i]: value for i, value in enumerate(row) if i < len(headers)}
-                    
-                    try:
-                        # Extract first name, last name, and city
-                        first_name = data.get("First Name", "").strip()
-                        last_name = data.get("Last Name", "").strip()
-                        city = data.get("CITY", "").strip()
-                        
-                        if not first_name or not last_name or not city:
-                            print(f"Missing required data for row {row_idx+1}")
-                            continue
-                        
-                        print(f"Searching for: {first_name} {last_name} in {city}")
-                        
-                        # Initialize update cells
-                        update_cells = []
-                        
-                        # Extract specialties and oath date using specialty_extractor
-                        specialties, oath_date, lawyer_url = specialty_extractor.extract_lawyer_data(first_name, last_name, city)
-                        
-                        if lawyer_url:  # If we got a valid URL
-                            # Update specialties (up to 5)
-                            for i, idx in enumerate(specialty_indices):
-                                specialty_value = "None"
-                                if specialties and i < len(specialties):
-                                    specialty_value = specialties[i]
-                                update_cells.append(gspread.Cell(row_idx+1, idx+1, specialty_value))
+                    while row_indices and not self.should_stop:
+                        # Submit new tasks only if we have room
+                        while len(active_futures) < self.max_workers and row_indices:
+                            row_idx = row_indices.pop()
+                            row = all_values[row_idx]
                             
-                            # Update oath date
-                            update_cells.append(gspread.Cell(row_idx+1, serment_index+1, oath_date))
-                            
-                            # Update the URL
-                            update_cells.append(gspread.Cell(row_idx+1, url_index+1, lawyer_url))
-                        else:
-                            # Handle error case
-                            for idx in specialty_indices:
-                                update_cells.append(gspread.Cell(row_idx+1, idx+1, "None"))
-                            update_cells.append(gspread.Cell(row_idx+1, serment_index+1, "Not found"))
-                            update_cells.append(gspread.Cell(row_idx+1, url_index+1, "Not found"))
+                            # Submit the task to the thread pool
+                            future = executor.submit(
+                                self.process_single_lead,
+                                leads_sheet,
+                                processed_sheet,
+                                row_idx,
+                                row,
+                                headers
+                            )
+                            active_futures.add(future)
+                            print(f"Started processing row {row_idx+1} (Active threads: {len(active_futures)})")
+                            time.sleep(random.uniform(0.1, 0.3))  # Small delay between submissions
                         
-                        # After successful processing and updating cells, move to processed sheet
-                        try:
-                            # First update the cells
-                            if update_cells:
+                        # Wait for at least one task to complete before submitting more
+                        if active_futures:
+                            done, _ = concurrent.futures.wait(
+                                active_futures,
+                                return_when=concurrent.futures.FIRST_COMPLETED
+                            )
+                            for future in done:
+                                active_futures.remove(future)
                                 try:
-                                    self.update_sheet_with_backoff(leads_sheet, update_cells)
-                                    # Get the updated row data after applying changes
-                                    updated_row = leads_sheet.row_values(row_idx + 1)
-                                    
-                                    # Check if we have both valid URL and oath date
-                                    url_value = updated_row[url_index].strip()
-                                    oath_date_value = updated_row[serment_index].strip()
-                                    
-                                    has_valid_url = url_value and url_value not in ["None", "Not found"]
-                                    has_valid_oath = oath_date_value and oath_date_value != "Not found"
-                                    
-                                    if has_valid_url and has_valid_oath:
-                                        # Move to processed sheet and delete
-                                        if self.move_to_processed(leads_sheet, processed_sheet, row_idx, updated_row):
-                                            try:
-                                                leads_sheet.delete_rows(row_idx + 1)
-                                                print(f"Successfully moved and deleted row {row_idx+1}")
-                                            except Exception as e:
-                                                print(f"Error deleting row {row_idx+1}: {str(e)}")
-                                        else:
-                                            print(f"Failed to move row {row_idx+1} to processed sheet")
-                                    else:
-                                        missing_items = []
-                                        if not has_valid_url:
-                                            missing_items.append("URL")
-                                        if not has_valid_oath:
-                                            missing_items.append("oath date")
-                                        print(f"Row {row_idx+1} kept for retry: Missing {' and '.join(missing_items)}")
-                                        print(f"Current values - URL: {url_value}, Oath Date: {oath_date_value}")
-                                    
+                                    future.result()  # Get the result to catch any exceptions
                                 except Exception as e:
-                                    print(f"Failed to update sheet after retries: {str(e)}")
-                                    continue
-                            
-                            print(f"Successfully processed {first_name} {last_name}")
-                            
-                        except Exception as e:
-                            error_message = str(e)
-                            print(f"Error processing row {row_idx+1}: {error_message}")
-                            continue
-                    except Exception as e:
-                        error_message = str(e)
-                        print(f"Error processing row {row_idx+1}: {error_message}")
-                        continue
+                                    print(f"Task failed with error: {str(e)}")
+                    
+                    # Wait for remaining tasks to complete
+                    if active_futures:
+                        concurrent.futures.wait(active_futures)
                 
-                # Wait before checking for new leads
                 print(f"\nWaiting {self.delay} seconds before checking for new leads...")
                 time.sleep(self.delay)
                 
