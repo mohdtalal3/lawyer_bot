@@ -79,10 +79,9 @@ def extract_data(data):
         print(f"Error extracting specialties: {str(e)}")
         return pd.DataFrame(columns=['Subcategory', 'Count'])
 
-def extract_lawyer_data(first_name, last_name, city, rate_limit_event):
+def extract_lawyer_data(first_name, last_name, city):
     """
     Extract lawyer specialties and oath date from doctrine.fr
-    rate_limit_event: Threading event to coordinate rate limit pauses
     """
     # Create a session for all requests
     session = requests.Session()
@@ -109,11 +108,6 @@ def extract_lawyer_data(first_name, last_name, city, rate_limit_event):
 
     while retry_count < max_retries:
         try:
-            # Check if we're in a rate limit pause
-            if rate_limit_event.is_set():
-                print(f"Thread for {first_name} {last_name} waiting for rate limit cooldown...")
-                rate_limit_event.wait()  # Wait until the event is cleared
-            
             # Get lawyer ID using the same session
             lawyer_id = get_lawyer_id(session, first_name, last_name, city)
             if not lawyer_id:
@@ -138,9 +132,7 @@ def extract_lawyer_data(first_name, last_name, city, rate_limit_event):
             if response_first.status_code in [429, 403]:
                 retry_count += 1
                 print(f"\n⚠️ Rate limit detected! Setting pause for all threads...")
-                rate_limit_event.set()  # Signal all threads to pause
                 time.sleep(delay)  # Wait for 2 minutes
-                rate_limit_event.clear()  # Allow threads to continue
                 continue
 
             if response_first.status_code == 200:
@@ -184,9 +176,7 @@ def extract_lawyer_data(first_name, last_name, city, rate_limit_event):
                             print("\n⚠️ CAPTCHA detected after maximum retries! Stopping the process.")
                             sys.exit(1)
                         print(f"\n⚠️ Access denied! Setting pause for all threads...")
-                        rate_limit_event.set()
                         time.sleep(delay)
-                        rate_limit_event.clear()
                         continue
 
         except Exception as e:
