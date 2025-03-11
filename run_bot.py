@@ -2,7 +2,6 @@ import time
 import sys
 import gspread
 from google.oauth2.service_account import Credentials
-import link_extractor
 import specialty_extractor
 import re
 from time import sleep
@@ -186,88 +185,23 @@ class LeadProcessor:
                             print(f"Missing required data for row {row_idx+1}")
                             continue
                         
-                        # Create search query
-                        search_query = f"{first_name}+{last_name}+{city}+doctrine.fr"
-                        search_url = f"https://www.bing.com/search?q={search_query}"
-                        
                         print(f"Searching for: {first_name} {last_name} in {city}")
-                        
-                        connection_retries = 0
-                        while connection_retries < self.max_connection_retries:
-                            try:
-                                doctrine_url = link_extractor.extract_and_check_links(search_url)
-                                break
-                            except Exception as e:
-                                if "Failed to establish a new connection" in str(e):
-                                    connection_retries += 1
-                                    if connection_retries < self.max_connection_retries:
-                                        print(f"\n⚠️ Connection error! Waiting {self.connection_retry_delay} seconds before retry {connection_retries}/{self.max_connection_retries}")
-                                        time.sleep(self.connection_retry_delay)
-                                    else:
-                                        print("Max connection retries exceeded, skipping this lead")
-                                        break
-                                else:
-                                    raise e
                         
                         # Initialize update cells
                         update_cells = []
                         
-                        if not doctrine_url:
-                            print(f"No doctrine.fr link found for {first_name} {last_name}")
-                            # Update the row with empty values and "Not found" URL
-                            for idx in specialty_indices:
-                                update_cells.append(gspread.Cell(row_idx+1, idx+1, "None"))
-                            update_cells.append(gspread.Cell(row_idx+1, serment_index+1, "Not found"))
-                            update_cells.append(gspread.Cell(row_idx+1, url_index+1, "Not found"))
-                            try:
-                                self.update_sheet_with_backoff(leads_sheet, update_cells)
-                            except Exception as e:
-                                print(f"Failed to update sheet after retries: {str(e)}")
-                                continue
-                            continue
-                        
-                        print(f"Found doctrine.fr link: {doctrine_url}")
-                        
                         # Extract specialties and oath date using specialty_extractor
-                        lawyer_id = re.search(r'avocat/([A-Z0-9]+)', doctrine_url)
-                        if not lawyer_id:
-                            print(f"Could not extract lawyer ID from URL: {doctrine_url}")
-                            # Update with empty values but save the URL
+                        specialties, oath_date, error_type = specialty_extractor.extract_lawyer_data(first_name, last_name, city)
+                        
+                        if error_type:
+                            print(f"Error extracting data for {first_name} {last_name}: {error_type}")
+                            # Update with empty values if extraction fails
                             for idx in specialty_indices:
                                 update_cells.append(gspread.Cell(row_idx+1, idx+1, "None"))
                             update_cells.append(gspread.Cell(row_idx+1, serment_index+1, "Not found"))
-                            update_cells.append(gspread.Cell(row_idx+1, url_index+1, doctrine_url))
-                            try:
-                                self.update_sheet_with_backoff(leads_sheet, update_cells)
-                            except Exception as e:
-                                print(f"Failed to update sheet after retries: {str(e)}")
-                            continue
-                            
-                        lawyer_id = lawyer_id.group(1)
-                        
-                        try:
-                            # Extract specialties and oath date
-                            specialties, oath_date, error_type = specialty_extractor.extract_lawyer_data(lawyer_id)
-                            
-                            # Check if there was a session cookie error
-                            if error_type == "readKey" or error_type and "cookie" in error_type:
-                                print("\n⚠️ SESSION COOKIE ERROR ⚠️")
-                                print("Your session cookie has expired or is invalid.")
-                                print("Please update the session_cookie.txt file with a new cookie.")
-                                print("See the README for instructions on getting a new session cookie.")
-                                
-                                # Ask user if they want to update the cookie now
-                                update_now = input("Have you updated the session cookie? (y/n): ").strip().lower()
-                                if update_now == 'y':
-                                    print("Continuing with the updated session cookie...")
-                                    # Try again with the updated cookie
-                                    specialties, oath_date, error_type = specialty_extractor.extract_lawyer_data(lawyer_id)
-                                    if error_type:
-                                        raise Exception(f"Still having issues with the cookie: {error_type}")
-                                else:
-                                    print("Please update the session cookie and restart the bot.")
-                                    sys.exit(1)
-                            
+                            # Mark URL as None to retry later
+                            update_cells.append(gspread.Cell(row_idx+1, url_index+1, "None"))
+                        else:
                             # Update specialties (up to 5)
                             for i, idx in enumerate(specialty_indices):
                                 specialty_value = "None"
@@ -285,34 +219,8 @@ class LeadProcessor:
                                 print(f"No oath date found for {first_name} {last_name}, marking for retry")
                             else:
                                 # Update the URL if specialties were found
-                                update_cells.append(gspread.Cell(row_idx+1, url_index+1, doctrine_url))
+                                update_cells.append(gspread.Cell(row_idx+1, url_index+1, "https://www.doctrine.fr/p/avocat/" + specialties[0] if specialties else "Not found"))
                             
-                        except Exception as e:
-                            error_message = str(e)
-                            print(f"Error extracting data for {first_name} {last_name}: {str(e)}")
-                            
-                            # Check if it's a session cookie error
-                            if "readKey" in error_message or "session cookie" in error_message.lower():
-                                print("\n⚠️ SESSION COOKIE ERROR ⚠️")
-                                print("Your session cookie has expired or is invalid.")
-                                print("Please update the session_cookie.txt file with a new cookie.")
-                                print("See the README for instructions on getting a new session cookie.")
-                                
-                                # Ask user if they want to update the cookie now
-                                update_now = input("Have you updated the session cookie? (y/n): ").strip().lower()
-                                if update_now == 'y':
-                                    print("Continuing with the updated session cookie...")
-                                else:
-                                    print("Please update the session cookie and restart the bot.")
-                                    sys.exit(1)
-                            
-                            # Update with empty values if extraction fails
-                            for idx in specialty_indices:
-                                update_cells.append(gspread.Cell(row_idx+1, idx+1, "None"))
-                            update_cells.append(gspread.Cell(row_idx+1, serment_index+1, "Not found"))
-                            # Mark URL as None to retry later
-                            update_cells.append(gspread.Cell(row_idx+1, url_index+1, "None"))
-                        
                         # After successful processing and updating cells, move to processed sheet
                         try:
                             # First update the cells
