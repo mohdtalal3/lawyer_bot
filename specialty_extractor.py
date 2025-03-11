@@ -128,8 +128,12 @@ def extract_lawyer_data(first_name, last_name, city):
     # Default values
     specialties = []
     oath_date = "Not found"
+    lawyer_url = None  # Add this to track the URL
 
     if response_first.status_code == 200:
+        # Save the valid URL since we got a 200 response
+        lawyer_url = url_lawyer_page
+        
         # Extract JSON from the response HTML using regex
         match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', response_first.text, re.DOTALL)
         
@@ -163,6 +167,9 @@ def extract_lawyer_data(first_name, last_name, city):
                     decisions_data = response_second.json()
                     top_subcategories = extract_data(decisions_data)
                     specialties = top_subcategories['Subcategory'].tolist()
+                    # If no specialties found but we have URL and oath date, fill with "None"
+                    if not specialties:
+                        specialties = ["None"] * 5
 
             except KeyError as e:
                 error_msg = str(e)
@@ -199,7 +206,8 @@ def extract_lawyer_data(first_name, last_name, city):
                 return [], "Not found", "data_error"
 
     session.close()
-    return specialties, oath_date, None
+    # Return the lawyer_url instead of None for the error parameter when successful
+    return specialties, oath_date, lawyer_url if lawyer_url else None
 
 def main():
     # Example usage

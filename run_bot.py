@@ -191,17 +191,9 @@ class LeadProcessor:
                         update_cells = []
                         
                         # Extract specialties and oath date using specialty_extractor
-                        specialties, oath_date, error_type = specialty_extractor.extract_lawyer_data(first_name, last_name, city)
+                        specialties, oath_date, lawyer_url = specialty_extractor.extract_lawyer_data(first_name, last_name, city)
                         
-                        if error_type:
-                            print(f"Error extracting data for {first_name} {last_name}: {error_type}")
-                            # Update with empty values if extraction fails
-                            for idx in specialty_indices:
-                                update_cells.append(gspread.Cell(row_idx+1, idx+1, "None"))
-                            update_cells.append(gspread.Cell(row_idx+1, serment_index+1, "Not found"))
-                            # Mark URL as None to retry later
-                            update_cells.append(gspread.Cell(row_idx+1, url_index+1, "None"))
-                        else:
+                        if lawyer_url:  # If we got a valid URL
                             # Update specialties (up to 5)
                             for i, idx in enumerate(specialty_indices):
                                 specialty_value = "None"
@@ -209,18 +201,18 @@ class LeadProcessor:
                                     specialty_value = specialties[i]
                                 update_cells.append(gspread.Cell(row_idx+1, idx+1, specialty_value))
                             
-                            # Update oath date (use "Not found" if empty)
-                            oath_date = oath_date if oath_date else "Not found"
+                            # Update oath date
                             update_cells.append(gspread.Cell(row_idx+1, serment_index+1, oath_date))
                             
-                            # If no oath_date were found, mark URL as None to retry later
-                            if oath_date == "Not found":
-                                update_cells.append(gspread.Cell(row_idx+1, url_index+1, "None"))
-                                print(f"No oath date found for {first_name} {last_name}, marking for retry")
-                            else:
-                                # Update the URL if specialties were found
-                                update_cells.append(gspread.Cell(row_idx+1, url_index+1, "https://www.doctrine.fr/p/avocat/" + specialties[0] if specialties else "Not found"))
-                            
+                            # Update the URL
+                            update_cells.append(gspread.Cell(row_idx+1, url_index+1, lawyer_url))
+                        else:
+                            # Handle error case
+                            for idx in specialty_indices:
+                                update_cells.append(gspread.Cell(row_idx+1, idx+1, "None"))
+                            update_cells.append(gspread.Cell(row_idx+1, serment_index+1, "Not found"))
+                            update_cells.append(gspread.Cell(row_idx+1, url_index+1, "Not found"))
+                        
                         # After successful processing and updating cells, move to processed sheet
                         try:
                             # First update the cells
@@ -230,12 +222,14 @@ class LeadProcessor:
                                     # Get the updated row data after applying changes
                                     updated_row = leads_sheet.row_values(row_idx + 1)
                                     
-                                    # Only move to processed sheet if we have both valid URL and oath date
+                                    # Check if we have both valid URL and oath date
                                     url_value = updated_row[url_index].strip()
                                     oath_date_value = updated_row[serment_index].strip()
                                     
-                                    if (url_value and url_value not in ["None", "Not found"] and 
-                                        oath_date_value and oath_date_value != "Not found"):
+                                    has_valid_url = url_value and url_value not in ["None", "Not found"]
+                                    has_valid_oath = oath_date_value and oath_date_value != "Not found"
+                                    
+                                    if has_valid_url and has_valid_oath:
                                         # Move to processed sheet and delete
                                         if self.move_to_processed(leads_sheet, processed_sheet, row_idx, updated_row):
                                             try:
@@ -244,9 +238,15 @@ class LeadProcessor:
                                             except Exception as e:
                                                 print(f"Error deleting row {row_idx+1}: {str(e)}")
                                         else:
-                                            print(f"Row {row_idx+1} not moved: missing valid URL or oath date")
+                                            print(f"Failed to move row {row_idx+1} to processed sheet")
                                     else:
-                                        print(f"Row {row_idx+1} kept for retry: URL={url_value}, Oath Date={oath_date_value}")
+                                        missing_items = []
+                                        if not has_valid_url:
+                                            missing_items.append("URL")
+                                        if not has_valid_oath:
+                                            missing_items.append("oath date")
+                                        print(f"Row {row_idx+1} kept for retry: Missing {' and '.join(missing_items)}")
+                                        print(f"Current values - URL: {url_value}, Oath Date: {oath_date_value}")
                                     
                                 except Exception as e:
                                     print(f"Failed to update sheet after retries: {str(e)}")
