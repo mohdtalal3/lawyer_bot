@@ -220,45 +220,27 @@ class LeadProcessor:
                 
                 # Create a thread pool
                 with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    active_futures = set()
+                    futures = []
                     # Process rows from bottom to top
-                    row_indices = list(range(len(all_values) - 1, 0, -1))
-                    
-                    while row_indices and not self.should_stop:
-                        # Submit new tasks only if we have room
-                        while len(active_futures) < self.max_workers and row_indices:
-                            row_idx = row_indices.pop()
-                            row = all_values[row_idx]
-                            
-                            # Submit the task to the thread pool
-                            future = executor.submit(
-                                self.process_single_lead,
-                                leads_sheet,
-                                processed_sheet,
-                                row_idx,
-                                row,
-                                headers
-                            )
-                            active_futures.add(future)
-                            print(f"Started processing row {row_idx+1} (Active threads: {len(active_futures)})")
-                            time.sleep(random.uniform(0.1, 0.3))  # Small delay between submissions
+                    for row_idx in range(len(all_values) - 1, 0, -1):
+                        row = all_values[row_idx]
                         
-                        # Wait for at least one task to complete before submitting more
-                        if active_futures:
-                            done, _ = concurrent.futures.wait(
-                                active_futures,
-                                return_when=concurrent.futures.FIRST_COMPLETED
-                            )
-                            for future in done:
-                                active_futures.remove(future)
-                                try:
-                                    future.result()  # Get the result to catch any exceptions
-                                except Exception as e:
-                                    print(f"Task failed with error: {str(e)}")
+                        # Submit the task to the thread pool
+                        future = executor.submit(
+                            self.process_single_lead,
+                            leads_sheet,
+                            processed_sheet,
+                            row_idx,
+                            row,
+                            headers
+                        )
+                        futures.append(future)
+                        
+                        # Add a small delay between submissions
+                        time.sleep(random.uniform(0.01, 0.05))
                     
-                    # Wait for remaining tasks to complete
-                    if active_futures:
-                        concurrent.futures.wait(active_futures)
+                    # Wait for all futures to complete
+                    concurrent.futures.wait(futures)
                 
                 print(f"\nWaiting {self.delay} seconds before checking for new leads...")
                 time.sleep(self.delay)
