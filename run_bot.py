@@ -15,8 +15,11 @@ class LeadProcessor:
         self.sheet_name = sheet_name
         self.delay = float(delay)
         self.should_stop = False
-        self.base_delay = 60  # Base delay for exponential backoff
+        self.base_delay = 80  # Base delay for exponential backoff
         self.max_retries = 5  # Maximum number of retries
+        self.processed_sheet_name = "processed_lawyers"
+        self.connection_retry_delay = 300  # 5 minutes
+        self.max_connection_retries = 3
         
     def setup_google_sheets(self):
         scope = [
@@ -28,18 +31,32 @@ class LeadProcessor:
             client = gspread.authorize(creds)
             spreadsheet = client.open_by_key(self.sheet_id)
             
-            # Get the specified sheet
+            # Get the main sheet
             try:
                 leads_sheet = spreadsheet.worksheet(self.sheet_name)
             except gspread.exceptions.WorksheetNotFound:
                 print(f"Sheet '{self.sheet_name}' not found!")
-                return None
+                return None, None
+
+            # Check if processed_lawyers sheet exists, if not create it
+            try:
+                processed_sheet = spreadsheet.worksheet(self.processed_sheet_name)
+            except gspread.exceptions.WorksheetNotFound:
+                print(f"Creating new sheet '{self.processed_sheet_name}'...")
+                processed_sheet = spreadsheet.add_worksheet(
+                    title=self.processed_sheet_name,
+                    rows=1000,
+                    cols=20
+                )
+                # Copy headers from main sheet
+                headers = leads_sheet.row_values(1)
+                processed_sheet.update('A1', [headers])
                 
-            return leads_sheet
+            return leads_sheet, processed_sheet
             
         except Exception as e:
             print(f"Error setting up Google Sheets: {str(e)}")
-            return None
+            return None, None
 
     def update_sheet_with_backoff(self, leads_sheet, update_cells):
         """
@@ -64,9 +81,40 @@ class LeadProcessor:
                     raise e
         return False
 
+    def move_to_processed(self, leads_sheet, processed_sheet, row_idx, row_data):
+        """Move a row to the processed sheet with exponential backoff"""
+        retry_count = 0
+        while retry_count < self.max_retries:
+            try:
+                # Get the next empty row in processed sheet
+                processed_values = processed_sheet.get_all_values()
+                next_row = len(processed_values) + 1
+
+                # Add row to processed sheet
+                processed_sheet.insert_row(row_data, next_row)
+                print(f"Successfully moved row {row_idx+1} to processed sheet")
+                return True
+                
+            except Exception as e:
+                if "Quota exceeded" in str(e) or "429" in str(e):
+                    retry_count += 1
+                    if retry_count == self.max_retries:
+                        print(f"Max retries ({self.max_retries}) exceeded for moving row to processed sheet")
+                        return False
+                    
+                    # Calculate delay with exponential backoff and jitter
+                    delay = min(300, self.base_delay * (2 ** retry_count) + random.uniform(0, 10))
+                    print(f"\n⚠️ Rate limit hit while moving to processed sheet! Waiting {delay:.1f} seconds before retry {retry_count}/{self.max_retries}")
+                    sleep(delay)
+                else:
+                    print(f"Error moving row to processed sheet: {str(e)}")
+                    return False
+        
+        return False
+
     def process_leads(self):
-        leads_sheet = self.setup_google_sheets()
-        if not leads_sheet:
+        leads_sheet, processed_sheet = self.setup_google_sheets()
+        if not leads_sheet or not processed_sheet:
             return
 
         while not self.should_stop:
@@ -100,19 +148,25 @@ class LeadProcessor:
                     print(f"Required column not found in headers: {str(e)}")
                     return
                 
-                # Process each row starting from index 1 (after headers)
-                for row_idx in range(1, len(all_values)):
+                # Process rows from bottom to top (excluding header)
+                for row_idx in range(len(all_values) - 1, 0, -1):
                     if self.should_stop:
                         break
                         
                     row = all_values[row_idx]
                     
-                    # Skip if there's a valid doctrine.fr URL without adding delay
-                    if (row_idx < len(all_values) and 
-                        url_index < len(row) and 
+                    # Skip if there's a valid doctrine.fr URL
+                    if (url_index < len(row) and 
                         row[url_index].strip() and 
                         "doctrine.fr/p/avocat" in row[url_index].strip()):
                         print(f"Skipping row {row_idx+1} - already has valid doctrine.fr URL")
+                        # Move to processed sheet and delete immediately
+                        if self.move_to_processed(leads_sheet, processed_sheet, row_idx, row):
+                            try:
+                                leads_sheet.delete_rows(row_idx + 1)
+                                print(f"Successfully moved and deleted row {row_idx+1}")
+                            except Exception as e:
+                                print(f"Error deleting row {row_idx+1}: {str(e)}")
                         continue
                     
                     # Only add delay if we're actually going to process this lead
@@ -138,8 +192,22 @@ class LeadProcessor:
                         
                         print(f"Searching for: {first_name} {last_name} in {city}")
                         
-                        # Extract link using link_extractor
-                        doctrine_url = link_extractor.extract_and_check_links(search_url)
+                        connection_retries = 0
+                        while connection_retries < self.max_connection_retries:
+                            try:
+                                doctrine_url = link_extractor.extract_and_check_links(search_url)
+                                break
+                            except Exception as e:
+                                if "Failed to establish a new connection" in str(e):
+                                    connection_retries += 1
+                                    if connection_retries < self.max_connection_retries:
+                                        print(f"\n⚠️ Connection error! Waiting {self.connection_retry_delay} seconds before retry {connection_retries}/{self.max_connection_retries}")
+                                        time.sleep(self.connection_retry_delay)
+                                    else:
+                                        print("Max connection retries exceeded, skipping this lead")
+                                        break
+                                else:
+                                    raise e
                         
                         # Initialize update cells
                         update_cells = []
@@ -173,7 +241,6 @@ class LeadProcessor:
                                 self.update_sheet_with_backoff(leads_sheet, update_cells)
                             except Exception as e:
                                 print(f"Failed to update sheet after retries: {str(e)}")
-                                continue
                             continue
                             
                         lawyer_id = lawyer_id.group(1)
@@ -246,15 +313,43 @@ class LeadProcessor:
                             # Mark URL as None to retry later
                             update_cells.append(gspread.Cell(row_idx+1, url_index+1, "None"))
                         
-                        # When updating the sheet, use update_sheet_with_backoff directly
+                        # After successful processing and updating cells, move to processed sheet
                         try:
-                            self.update_sheet_with_backoff(leads_sheet, update_cells)
+                            # First update the cells
+                            if update_cells:
+                                try:
+                                    self.update_sheet_with_backoff(leads_sheet, update_cells)
+                                    # Get the updated row data after applying changes
+                                    updated_row = leads_sheet.row_values(row_idx + 1)
+                                    
+                                    # Only move to processed sheet if we have both valid URL and oath date
+                                    url_value = updated_row[url_index].strip()
+                                    oath_date_value = updated_row[serment_index].strip()
+                                    
+                                    if (url_value and url_value not in ["None", "Not found"] and 
+                                        oath_date_value and oath_date_value != "Not found"):
+                                        # Move to processed sheet and delete
+                                        if self.move_to_processed(leads_sheet, processed_sheet, row_idx, updated_row):
+                                            try:
+                                                leads_sheet.delete_rows(row_idx + 1)
+                                                print(f"Successfully moved and deleted row {row_idx+1}")
+                                            except Exception as e:
+                                                print(f"Error deleting row {row_idx+1}: {str(e)}")
+                                        else:
+                                            print(f"Row {row_idx+1} not moved: missing valid URL or oath date")
+                                    else:
+                                        print(f"Row {row_idx+1} kept for retry: URL={url_value}, Oath Date={oath_date_value}")
+                                    
+                                except Exception as e:
+                                    print(f"Failed to update sheet after retries: {str(e)}")
+                                    continue
+                            
+                            print(f"Successfully processed {first_name} {last_name}")
+                            
                         except Exception as e:
-                            print(f"Failed to update sheet after retries: {str(e)}")
+                            error_message = str(e)
+                            print(f"Error processing row {row_idx+1}: {error_message}")
                             continue
-                        
-                        print(f"Successfully processed {first_name} {last_name}")
-                        
                     except Exception as e:
                         error_message = str(e)
                         print(f"Error processing row {row_idx+1}: {error_message}")
