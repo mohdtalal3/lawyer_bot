@@ -8,7 +8,7 @@ import time
 
 def get_lawyer_id(session, first_name, last_name, city):
     """
-    Extract lawyer ID directly from doctrine.fr API using existing session
+    Extract lawyer ID and oath date directly from doctrine.fr API using existing session
     """
     # Base URL for the API
     base_url = "https://www.doctrine.fr/api/v2/search"
@@ -33,26 +33,27 @@ def get_lawyer_id(session, first_name, last_name, city):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
     }
 
-    # Update session headers
     session.headers.update(headers)
 
     try:
-        # Send request using existing session
         response = session.get(base_url, params=params)
 
         if response.status_code == 200:
-           
             data = response.json()
             hits = data.get("hits", [])
             if hits:  # Check if there's at least one result
-                return hits[0].get("id")  # Return the ID of the first lawyer
+                lawyer_id = hits[0].get("id")
+                oath_date = hits[0].get("sermentDate", "Not found")
+                return lawyer_id, oath_date
+        elif response.status_code == 404:
+            print(f"Lawyer not found: {first_name} {last_name} in {city}")
         else:
             print(f"API request failed with status code {response.status_code}")
             
     except Exception as e:
         print(f"Error searching for lawyer: {str(e)}")
     
-    return None
+    return None, "Not found"
 
 def extract_data(data):
     try:
@@ -83,6 +84,7 @@ def extract_lawyer_data(first_name, last_name, city):
     """
     Extract lawyer specialties and oath date from doctrine.fr
     """
+    # Create a session for all requests
     session = requests.Session()
     retry_count = 0
     max_retries = 5
@@ -105,8 +107,8 @@ def extract_lawyer_data(first_name, last_name, city):
         print(f"Error reading session cookie: {str(e)}")
         return [], "Not found", None
 
-    # First get the lawyer ID
-    lawyer_id = get_lawyer_id(session, first_name, last_name, city)
+    # Get lawyer ID and oath date from API
+    lawyer_id, oath_date = get_lawyer_id(session, first_name, last_name, city)
     if not lawyer_id:
         print(f"Could not find lawyer ID for {first_name} {last_name} in {city}")
         return [], "Not found", None
@@ -128,31 +130,19 @@ def extract_lawyer_data(first_name, last_name, city):
             session.headers.update(headers_first)
             response_first = session.get(url_lawyer_page)
 
-            if response_first.status_code in [429, 403]:
+            if response_first.status_code == 404:
+                print(f"Lawyer page not found: {url_lawyer_page}")
+                return [], "Not found", None
+            elif response_first.status_code in [429, 403]:
                 retry_count += 1
-                if retry_count >= max_retries:
-                    print("\n⚠️ Maximum retries reached. Please try again later.")
-                    return [], "Not found", None
-                    
-                print(f"\n⚠️ Rate limit/Access denied! Attempt {retry_count}/{max_retries}")
-                print("Please solve the CAPTCHA in your browser:")
-                print(f"URL: {url_lawyer_page}")
-                try:
-                    user_input = input("Press Enter after solving CAPTCHA (or type 'skip' to skip): ")
-                    if user_input.lower() == 'skip':
-                        print("Skipping this lawyer...")
-                        return [], "Not found", None
-                except KeyboardInterrupt:
-                    print("\nProcess interrupted by user")
-                    return [], "Not found", None
-                
-                # Add a delay after user input
-                print(f"Waiting {delay} seconds before retry...")
+                print(f"\n⚠️ Rate limit detected! Waiting {delay} seconds before retry {retry_count}/{max_retries}")
                 time.sleep(delay)
                 continue
+            elif response_first.status_code != 200:
+                print(f"Failed with status code {response_first.status_code}")
+                return [], "Not found", None
 
             if response_first.status_code == 200:
-                lawyer_url = url_lawyer_page
                 match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', response_first.text, re.DOTALL)
                 
                 if match:
@@ -160,11 +150,6 @@ def extract_lawyer_data(first_name, last_name, city):
                         json_data = match.group(1)
                         data = json.loads(json_data)
                         read_key = data["props"]["pageProps"]["readKey"]
-                        summary = data["props"]["pageProps"]["lawyerInfos"]["summary"]
-
-                        # Extract oath date
-                        oath_date_match = re.search(r"prêté serment le (\d{1,2} \w+ \d{4})|(\d{1,2} \w+ \d{4})", summary)
-                        oath_date = oath_date_match.group(1) if oath_date_match and oath_date_match.group(1) else oath_date_match.group(2) if oath_date_match else "Not found"
 
                         # Get specialties
                         headers_second = {
@@ -191,18 +176,10 @@ def extract_lawyer_data(first_name, last_name, city):
                         if retry_count >= max_retries:
                             print("\n⚠️ CAPTCHA detected after maximum retries! Stopping the process.")
                             sys.exit(1)
-                        print("\n⚠️ Access denied! CAPTCHA challenge detected.")
-                        print("Please solve the CAPTCHA in your browser:")
-                        print(f"URL: {url_lawyer_page}")
-                        try:
-                            user_input = input("Press Enter after solving CAPTCHA (or type 'skip' to skip): ")
-                            if user_input.lower() == 'skip':
-                                print("Skipping this lawyer...")
-                                return [], "Not found", None
-                        except KeyboardInterrupt:
-                            print("\nProcess interrupted by user")
-                            return [], "Not found", None
-                        
+                        print(f"\n⚠️ Access denied! Setting pause for all threads...")
+                        print("Please solve the CAPTCHA and press Enter to continue...")
+                        print("Open this url in your browser", url_lawyer_page)
+                        input("Press Enter to continue...")
                         time.sleep(delay)
                         continue
 

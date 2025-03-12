@@ -75,7 +75,7 @@ class LeadProcessor:
                     if retry_count == self.max_retries:
                         raise Exception(f"Max retries ({self.max_retries}) exceeded for API quota limit")
                     
-                    # Calculate delay with exponential backoff and jitter
+                    # Calculate delay with exponential backoff and jitters
                     delay = min(300, self.base_delay * (2 ** retry_count) + random.uniform(0, 10))
                     print(f"\n⚠️ Rate limit hit! Waiting {delay:.1f} seconds before retry {retry_count}/{self.max_retries}")
                     sleep(delay)
