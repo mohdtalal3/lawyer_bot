@@ -5,35 +5,17 @@ import pandas as pd
 import os
 import sys
 import time
-import asyncio
-from pydoll.browser.chrome import Chrome
-from pydoll.browser.options import Options
-from pydoll.constants import By
 import os
+from seleniumbase import SB
 
 def solve_captcha(url):
     user_data_dir = os.path.join(os.getcwd(), 'user_data')
-    options = Options()
-    options.add_argument(f'--user-data-dir={user_data_dir}')
     extension_dir = os.path.join(os.getcwd(), 'extension')
-    options.add_argument(f'--load-extension={extension_dir}')
     
-    async def main():
-        async with Chrome(options=options) as browser:
-            await browser.start()
-            page = await browser.get_page()
-            await page.go_to(url)
-            # time.sleep(10)
-            # # Wait for the captcha button to be clickable using CSS Selector
-            # button = await page.find_element(By.CSS_SELECTOR, "button.SignupCaptcha_accessButton__RCz8B[type='button']")
-            # # Click the captcha button
-            # await button.click()
-            # # Wait for some time to ensure the captcha is solved
-            time.sleep(30)
-    
-    asyncio.run(main())
-
-
+    # Using the SeleniumBase context manager
+    with SB(user_data_dir=user_data_dir, extension_dir=extension_dir) as sb:
+        sb.open(url)
+        time.sleep(30)
 
 def get_lawyer_id(session, first_name, last_name, city):
     """

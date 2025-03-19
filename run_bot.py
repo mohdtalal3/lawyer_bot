@@ -6,43 +6,28 @@ import specialty_extractor
 import re
 from time import sleep
 import random
-import asyncio
-from pydoll.browser.chrome import Chrome
-from pydoll.browser.options import Options
-from pydoll.constants import By
 import os
+from seleniumbase import SB
 
 def login():
     user_data_dir = os.path.join(os.getcwd(), 'user_data')
-    options = Options()
-    options.add_argument(f'--user-data-dir={user_data_dir}')
     extension_dir = os.path.join(os.getcwd(), 'extension')
-    options.add_argument(f'--load-extension={extension_dir}')
     
-    async def main():
-        async with Chrome(options=options) as browser:
-            await browser.start()
-            page = await browser.get_page()
-            await page.go_to("https://www.doctrine.fr/inscription")
-            input("Press Enter After login")
-    
-    asyncio.run(main())
+    # Using the SeleniumBase context manager
+    with SB(user_data_dir=user_data_dir, extension_dir=extension_dir) as sb:
+        sb.open("https://www.doctrine.fr/inscription")
+        input("Press Enter After login")
+
 
 def again_checker():
     user_data_dir = os.path.join(os.getcwd(), 'user_data')
-    options = Options()
-    options.add_argument(f'--user-data-dir={user_data_dir}')
     extension_dir = os.path.join(os.getcwd(), 'extension')
-    options.add_argument(f'--load-extension={extension_dir}')
     
-    async def main():
-        async with Chrome(options=options) as browser:
-            await browser.start()
-            page = await browser.get_page()
-            await page.go_to("https://www.doctrine.fr/dashboard")
-            input("Press Enter After login")
-    
-    asyncio.run(main())
+    # Using the SeleniumBase context manager
+    with SB(user_data_dir=user_data_dir, extension_dir=extension_dir) as sb:
+        sb.open("https://www.doctrine.fr/dashboard")
+        input("Press Enter After login")
+
 
 class LeadProcessor:
     def __init__(self, sheet_id, sheet_name, delay=60):
