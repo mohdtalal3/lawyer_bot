@@ -6,6 +6,29 @@ import specialty_extractor
 import re
 from time import sleep
 import random
+import asyncio
+from pydoll.browser.chrome import Chrome
+from pydoll.browser.options import Options
+from pydoll.constants import By
+import os
+
+def login():
+    user_data_dir = os.path.join(os.getcwd(), 'user_data')
+    options = Options()
+    options.add_argument(f'--user-data-dir={user_data_dir}')
+    extension_dir = os.path.join(os.getcwd(), 'extension')
+    options.add_argument(f'--load-extension={extension_dir}')
+    
+    async def main():
+        async with Chrome(options=options) as browser:
+            await browser.start()
+            page = await browser.get_page()
+            await page.go_to("https://www.doctrine.fr/inscription")
+            input("Press Enter After login")
+    
+    asyncio.run(main())
+
+
 
 class LeadProcessor:
     def __init__(self, sheet_id, sheet_name, delay=60):
@@ -230,12 +253,16 @@ class LeadProcessor:
 
                 headers = [h.strip() for h in all_values[0]]
                 url_index = headers.index("doctrineURL")
-                
+                date_index = headers.index("Serment")
                 # Process rows from bottom to top
                 for row_idx in range(len(all_values) - 1, 0, -1):
                     row = all_values[row_idx]
                     current_url = row[url_index].strip() if url_index < len(row) else ""
-                    
+
+                    current_date = row[date_index].strip() if date_index < len(row) else ""
+                    if current_date=="Not found":
+                        print(current_date,"Skipping as not found")
+                        continue
                     # Skip if URL is already processed or has failed too many times
                     if current_url and "doctrine.fr/p/avocat" in current_url:
                         if current_url in self.processed_urls:
@@ -285,7 +312,7 @@ def main():
             break
         except ValueError:
             print("Please enter a valid number!")
-    
+    login()
     print("\nStarting with following settings:")
     print(f"Sheet ID: {sheet_id}")
     print(f"Sheet Name: {sheet_name}")

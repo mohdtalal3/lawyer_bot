@@ -5,6 +5,35 @@ import pandas as pd
 import os
 import sys
 import time
+import asyncio
+from pydoll.browser.chrome import Chrome
+from pydoll.browser.options import Options
+from pydoll.constants import By
+import os
+
+def solve_captcha(url):
+    user_data_dir = os.path.join(os.getcwd(), 'user_data')
+    options = Options()
+    options.add_argument(f'--user-data-dir={user_data_dir}')
+    extension_dir = os.path.join(os.getcwd(), 'extension')
+    options.add_argument(f'--load-extension={extension_dir}')
+    
+    async def main():
+        async with Chrome(options=options) as browser:
+            await browser.start()
+            page = await browser.get_page()
+            await page.go_to(url)
+            # time.sleep(10)
+            # # Wait for the captcha button to be clickable using CSS Selector
+            # button = await page.find_element(By.CSS_SELECTOR, "button.SignupCaptcha_accessButton__RCz8B[type='button']")
+            # # Click the captcha button
+            # await button.click()
+            # # Wait for some time to ensure the captcha is solved
+            time.sleep(30)
+    
+    asyncio.run(main())
+
+
 
 def get_lawyer_id(session, first_name, last_name, city):
     """
@@ -112,7 +141,9 @@ def extract_lawyer_data(first_name, last_name, city):
     if not lawyer_id:
         print(f"Could not find lawyer ID for {first_name} {last_name} in {city}")
         return [], "Not found", None
-
+    if oath_date=="Not found":
+        print("No Oath Date")
+        return [], "Not found", None
     # URL for the lawyer page
     url_lawyer_page = f"https://www.doctrine.fr/p/avocat/{lawyer_id}"
     print(f"URL for the lawyer page: {url_lawyer_page}")
@@ -141,7 +172,6 @@ def extract_lawyer_data(first_name, last_name, city):
             elif response_first.status_code != 200:
                 print(f"Failed with status code {response_first.status_code}")
                 return [], "Not found", None
-
             if response_first.status_code == 200:
                 match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', response_first.text, re.DOTALL)
                 
@@ -177,10 +207,9 @@ def extract_lawyer_data(first_name, last_name, city):
                             print("\n⚠️ CAPTCHA detected after maximum retries! Stopping the process.")
                             sys.exit(1)
                         print(f"\n⚠️ Access denied! Setting pause for all threads...")
-                        print("Please solve the CAPTCHA and press Enter to continue...")
-                        print("Open this url in your browser", url_lawyer_page)
-                        input("Press Enter to continue...")
-                        time.sleep(delay)
+                        print("Please solve the CAPTCHA")
+                        print("Solving Captcha", url_lawyer_page)
+                        solve_captcha(url_lawyer_page)
                         continue
 
             print(f"Failed with status code {response_first.status_code}")
